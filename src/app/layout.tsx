@@ -13,8 +13,16 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Next.js Template",
-  description: "A minimal Next.js starter template",
+  title: "Kolko Kosta - Usporedba cijena u hrvatskim supermarketima",
+  description:
+    "Usporedite cijene proizvoda u svim hrvatskim supermarketima. Konzum, Spar, Lidl, Kaufland, Plodine, Tommy i još mnogo više.",
+  keywords:
+    "cijene, supermarketi, Hrvatska, usporedba cijena, Konzum, Spar, Lidl, Kaufland",
+  openGraph: {
+    title: "Kolko Kosta",
+    description: "Usporedba cijena u hrvatskim supermarketima",
+    type: "website",
+  },
 };
 
 export default function RootLayout({
@@ -23,9 +31,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="hr">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-gray-50 min-h-screen`}
       >
         {children}
       </body>
