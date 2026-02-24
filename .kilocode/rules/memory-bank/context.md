@@ -1,87 +1,63 @@
-# Active Context: Next.js Starter Template
+# Active Context: Kolko Kosta - Croatian Supermarket Price Comparison
 
 ## Current State
 
-**Template Status**: ✅ Ready for development
+**Project Status**: ✅ Initial version deployed
 
-The template is a clean Next.js 16 starter with TypeScript and Tailwind CSS 4. It's ready for AI-assisted expansion to build any type of application.
+The project has been transformed from a Next.js starter template into "Kolko Kosta" - a Croatian supermarket price comparison website that fetches daily price data from api.cijene.dev.
 
 ## Recently Completed
 
-- [x] Base Next.js 16 setup with App Router
-- [x] TypeScript configuration with strict mode
-- [x] Tailwind CSS 4 integration
-- [x] ESLint configuration
-- [x] Memory bank documentation
-- [x] Recipe system for common features
+- [x] Explored cijene-api GitHub repository and live API at api.cijene.dev
+- [x] Understood ZIP archive structure (stores.csv, products.csv, prices.csv per chain)
+- [x] Installed dependencies: recharts, jszip, papaparse
+- [x] Built cijene.ts library for data fetching and parsing
+- [x] Created /api/search endpoint for product search with city filtering
+- [x] Created /api/cities endpoint with comprehensive Croatian city list
+- [x] Created /api/history endpoint for price history data
+- [x] Built main page with search, city selector, popular searches
+- [x] Built ProductCard component with price comparison bars
+- [x] Built PriceHistoryChart component with recharts line chart
+- [x] TypeScript and ESLint checks pass
+- [x] Committed and pushed to repository
 
 ## Current Structure
 
 | File/Directory | Purpose | Status |
 |----------------|---------|--------|
-| `src/app/page.tsx` | Home page | ✅ Ready |
-| `src/app/layout.tsx` | Root layout | ✅ Ready |
+| `src/app/page.tsx` | Main search page with city selector | ✅ Ready |
+| `src/app/layout.tsx` | Root layout with Croatian metadata | ✅ Ready |
 | `src/app/globals.css` | Global styles | ✅ Ready |
-| `.kilocode/` | AI context & recipes | ✅ Ready |
+| `src/app/api/search/route.ts` | Product search API | ✅ Ready |
+| `src/app/api/cities/route.ts` | Croatian cities list API | ✅ Ready |
+| `src/app/api/history/route.ts` | Price history API | ✅ Ready |
+| `src/lib/cijene.ts` | Data fetching/parsing library | ✅ Ready |
+| `src/components/ProductCard.tsx` | Product with price comparison | ✅ Ready |
+| `src/components/PriceHistoryChart.tsx` | Price history line chart | ✅ Ready |
+
+## Data Source
+
+- **API**: https://api.cijene.dev/v0/list - lists available daily ZIP archives
+- **Archives**: https://api.cijene.dev/v0/archive/YYYY-MM-DD.zip - daily ZIP files (~80MB each)
+- **Structure**: Each ZIP contains folders per chain with stores.csv, products.csv, prices.csv
+- **Chains**: Konzum, Spar, Studenac, Plodine, Lidl, Tommy, Kaufland, Eurospin, dm, KTC, Metro, Trgocentar, Vrutak, Ribola, NTL, Roto, Boso, Brodokomerc, Jadranka Trgovina, Trgovina Krk
+- **Data available since**: 2025-05-15
+
+## Known Issues / Limitations
+
+- ZIP files are ~80MB, too large for Next.js data cache (2MB limit) - warning during build but works at runtime
+- Price history API downloads multiple ZIP files which is slow - consider optimization
+- The ZIP files are processed server-side on each request (no persistent caching)
 
 ## Current Focus
 
-The template is ready. Next steps depend on user requirements:
-
-1. What type of application to build
-2. What features are needed
-3. Design/branding preferences
-
-## Quick Start Guide
-
-### To add a new page:
-
-Create a file at `src/app/[route]/page.tsx`:
-```tsx
-export default function NewPage() {
-  return <div>New page content</div>;
-}
-```
-
-### To add components:
-
-Create `src/components/` directory and add components:
-```tsx
-// src/components/ui/Button.tsx
-export function Button({ children }: { children: React.ReactNode }) {
-  return <button className="px-4 py-2 bg-blue-600 text-white rounded">{children}</button>;
-}
-```
-
-### To add a database:
-
-Follow `.kilocode/recipes/add-database.md`
-
-### To add API routes:
-
-Create `src/app/api/[route]/route.ts`:
-```tsx
-import { NextResponse } from "next/server";
-
-export async function GET() {
-  return NextResponse.json({ message: "Hello" });
-}
-```
-
-## Available Recipes
-
-| Recipe | File | Use Case |
-|--------|------|----------|
-| Add Database | `.kilocode/recipes/add-database.md` | Data persistence with Drizzle + SQLite |
-
-## Pending Improvements
-
-- [ ] Add more recipes (auth, email, etc.)
-- [ ] Add example components
-- [ ] Add testing setup recipe
+The initial version is deployed. Next steps based on user feedback:
+1. Performance optimization (caching, streaming)
+2. UI improvements
+3. Additional features (barcode scanner, shopping list, etc.)
 
 ## Session History
 
 | Date | Changes |
 |------|---------|
-| Initial | Template created with base setup |
+| 2026-02-24 | Initial build of Kolko Kosta price comparison website |
