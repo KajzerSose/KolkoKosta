@@ -1,6 +1,7 @@
 /**
  * cijene.ts - Data fetching and parsing for Croatian supermarket prices
  * Uses the cijene-api ZIP archives from https://api.cijene.dev
+ * Uses HTTP range requests to avoid downloading the full ~83MB ZIP
  */
 
 export const CHAINS = [
@@ -132,6 +133,15 @@ export interface ArchiveInfo {
   updated: string;
 }
 
+// ZIP central directory entry
+interface ZipEntry {
+  filename: string;
+  compressedSize: number;
+  uncompressedSize: number;
+  localHeaderOffset: number;
+  compressionMethod: number;
+}
+
 // Fetch list of available archives
 export async function fetchArchiveList(): Promise<ArchiveInfo[]> {
   const res = await fetch("https://api.cijene.dev/v0/list", {
@@ -151,7 +161,7 @@ export function getTodayDate(): string {
   return croatiaTime.toISOString().split("T")[0];
 }
 
-// Parse CSV text into array of objects (simple, no external deps)
+// Parse CSV text into array of objects
 export function parseCSVText(text: string): Record<string, string>[] {
   const lines = text.split("\n");
   if (lines.length < 2) return [];
@@ -163,7 +173,6 @@ export function parseCSVText(text: string): Record<string, string>[] {
     const line = lines[i].trim();
     if (!line) continue;
 
-    // Simple CSV parsing (handles basic cases)
     const values: string[] = [];
     let current = "";
     let inQuotes = false;
@@ -191,185 +200,436 @@ export function parseCSVText(text: string): Record<string, string>[] {
   return results;
 }
 
-// Fetch a specific CSV file from the ZIP archive using range requests
-// The ZIP format stores files at specific offsets, but we can't easily do range requests
-// Instead, we fetch individual chain CSV files via a proxy approach
-
-// Fetch chain data from the ZIP archive
-// We use a streaming approach to avoid loading the entire 80MB ZIP
-export async function fetchChainData(
-  date: string,
-  chain: string
-): Promise<{ stores: Store[]; products: Product[]; prices: Price[] }> {
-  // We need to download the ZIP and extract specific files
-  // Since the ZIP is large, we use JSZip but only in server context
-  const JSZip = (await import("jszip")).default;
-
-  const url = `https://api.cijene.dev/v0/archive/${date}.zip`;
+// Read a range of bytes from a URL
+async function fetchRange(url: string, start: number, end: number): Promise<ArrayBuffer> {
   const res = await fetch(url, {
-    next: { revalidate: 86400 }, // Cache for 24 hours
+    headers: { Range: `bytes=${start}-${end}` },
   });
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch archive for ${date}: ${res.status}`);
+  if (!res.ok && res.status !== 206) {
+    throw new Error(`Range request failed: ${res.status}`);
   }
-
-  const buffer = await res.arrayBuffer();
-  const zip = await JSZip.loadAsync(buffer);
-
-  const stores: Store[] = [];
-  const products: Product[] = [];
-  const prices: Price[] = [];
-
-  // Parse stores
-  const storesFile = zip.file(`${chain}/stores.csv`);
-  if (storesFile) {
-    const text = await storesFile.async("text");
-    const rows = parseCSVText(text);
-    stores.push(
-      ...rows.map((r) => ({
-        store_id: r.store_id || "",
-        type: r.type || "",
-        address: r.address || "",
-        city: r.city || "",
-        zipcode: r.zipcode || "",
-        chain,
-      }))
-    );
-  }
-
-  // Parse products
-  const productsFile = zip.file(`${chain}/products.csv`);
-  if (productsFile) {
-    const text = await productsFile.async("text");
-    const rows = parseCSVText(text);
-    products.push(
-      ...rows.map((r) => ({
-        product_id: r.product_id || "",
-        barcode: r.barcode || "",
-        name: r.name || "",
-        brand: r.brand || "",
-        category: r.category || "",
-        unit: r.unit || "",
-        quantity: r.quantity || "",
-        chain,
-      }))
-    );
-  }
-
-  // Parse prices
-  const pricesFile = zip.file(`${chain}/prices.csv`);
-  if (pricesFile) {
-    const text = await pricesFile.async("text");
-    const rows = parseCSVText(text);
-    prices.push(
-      ...rows.map((r) => ({
-        store_id: r.store_id || "",
-        product_id: r.product_id || "",
-        price: parseFloat(r.price) || 0,
-        unit_price: r.unit_price ? parseFloat(r.unit_price) : null,
-        best_price_30: r.best_price_30 ? parseFloat(r.best_price_30) : null,
-        anchor_price: r.anchor_price ? parseFloat(r.anchor_price) : null,
-        special_price: r.special_price ? parseFloat(r.special_price) : null,
-        chain,
-      }))
-    );
-  }
-
-  return { stores, products, prices };
+  return res.arrayBuffer();
 }
 
-// Fetch data for all chains for a given date
+// Read a 32-bit little-endian integer from a DataView
+function readUint32LE(view: DataView, offset: number): number {
+  return view.getUint32(offset, true);
+}
+
+// Read a 16-bit little-endian integer from a DataView
+function readUint16LE(view: DataView, offset: number): number {
+  return view.getUint16(offset, true);
+}
+
+// Parse the ZIP central directory to get file entries
+async function getZipEntries(url: string, fileSize: number): Promise<ZipEntry[]> {
+  // Step 1: Read the last 65KB to find the End of Central Directory (EOCD)
+  const tailSize = Math.min(65536 + 22, fileSize);
+  const tailStart = fileSize - tailSize;
+  const tailBuffer = await fetchRange(url, tailStart, fileSize - 1);
+  const tailView = new DataView(tailBuffer);
+
+  // Find EOCD signature: 0x06054b50
+  let eocdOffset = -1;
+  for (let i = tailBuffer.byteLength - 22; i >= 0; i--) {
+    if (
+      tailView.getUint8(i) === 0x50 &&
+      tailView.getUint8(i + 1) === 0x4b &&
+      tailView.getUint8(i + 2) === 0x05 &&
+      tailView.getUint8(i + 3) === 0x06
+    ) {
+      eocdOffset = i;
+      break;
+    }
+  }
+
+  if (eocdOffset === -1) {
+    throw new Error("Could not find ZIP End of Central Directory");
+  }
+
+  const cdSize = readUint32LE(tailView, eocdOffset + 12);
+  const cdOffset = readUint32LE(tailView, eocdOffset + 16);
+
+  // Step 2: Fetch the central directory
+  const cdBuffer = await fetchRange(url, cdOffset, cdOffset + cdSize - 1);
+  const cdView = new DataView(cdBuffer);
+
+  const entries: ZipEntry[] = [];
+  let pos = 0;
+
+  while (pos < cdBuffer.byteLength - 4) {
+    // Check for central directory file header signature: 0x02014b50
+    if (
+      cdView.getUint8(pos) !== 0x50 ||
+      cdView.getUint8(pos + 1) !== 0x4b ||
+      cdView.getUint8(pos + 2) !== 0x01 ||
+      cdView.getUint8(pos + 3) !== 0x02
+    ) {
+      break;
+    }
+
+    const compressionMethod = readUint16LE(cdView, pos + 10);
+    const compressedSize = readUint32LE(cdView, pos + 20);
+    const uncompressedSize = readUint32LE(cdView, pos + 24);
+    const filenameLength = readUint16LE(cdView, pos + 28);
+    const extraLength = readUint16LE(cdView, pos + 30);
+    const commentLength = readUint16LE(cdView, pos + 32);
+    const localHeaderOffset = readUint32LE(cdView, pos + 42);
+
+    const filenameBytes = new Uint8Array(cdBuffer, pos + 46, filenameLength);
+    const filename = new TextDecoder().decode(filenameBytes);
+
+    entries.push({
+      filename,
+      compressedSize,
+      uncompressedSize,
+      localHeaderOffset,
+      compressionMethod,
+    });
+
+    pos += 46 + filenameLength + extraLength + commentLength;
+  }
+
+  return entries;
+}
+
+// Decompress deflate data
+async function decompressDeflate(data: ArrayBuffer): Promise<string> {
+  const ds = new DecompressionStream("deflate-raw");
+  const writer = ds.writable.getWriter();
+  const reader = ds.readable.getReader();
+
+  writer.write(new Uint8Array(data));
+  writer.close();
+
+  const chunks: Uint8Array[] = [];
+  let done = false;
+  while (!done) {
+    const result = await reader.read();
+    if (result.done) {
+      done = true;
+    } else {
+      chunks.push(result.value);
+    }
+  }
+
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return new TextDecoder("utf-8").decode(combined);
+}
+
+// Fetch a specific file from a ZIP archive using range requests
+async function fetchZipFile(
+  url: string,
+  entry: ZipEntry
+): Promise<string> {
+  // Read the local file header to find the actual data offset
+  // Local header: signature(4) + version(2) + flags(2) + compression(2) + modtime(2) + moddate(2)
+  //               + crc32(4) + compressedSize(4) + uncompressedSize(4) + filenameLen(2) + extraLen(2) = 30 bytes
+  const localHeaderBuffer = await fetchRange(
+    url,
+    entry.localHeaderOffset,
+    entry.localHeaderOffset + 29
+  );
+  const localHeaderView = new DataView(localHeaderBuffer);
+  const localFilenameLength = readUint16LE(localHeaderView, 26);
+  const localExtraLength = readUint16LE(localHeaderView, 28);
+  const dataOffset =
+    entry.localHeaderOffset + 30 + localFilenameLength + localExtraLength;
+
+  // Fetch the compressed data
+  const compressedBuffer = await fetchRange(
+    url,
+    dataOffset,
+    dataOffset + entry.compressedSize - 1
+  );
+
+  // Decompress
+  if (entry.compressionMethod === 0) {
+    // Stored (no compression)
+    return new TextDecoder("utf-8").decode(compressedBuffer);
+  } else if (entry.compressionMethod === 8) {
+    // Deflate
+    return decompressDeflate(compressedBuffer);
+  } else {
+    throw new Error(`Unsupported compression method: ${entry.compressionMethod}`);
+  }
+}
+
+// Cache for ZIP entries (in-memory, per process)
+const zipEntriesCache = new Map<string, { entries: ZipEntry[]; size: number }>();
+
+// Get ZIP entries with caching
+async function getCachedZipEntries(url: string, fileSize: number): Promise<ZipEntry[]> {
+  const cached = zipEntriesCache.get(url);
+  if (cached && cached.size === fileSize) {
+    return cached.entries;
+  }
+  const entries = await getZipEntries(url, fileSize);
+  zipEntriesCache.set(url, { entries, size: fileSize });
+  return entries;
+}
+
+// Get ZIP entry map and available chains for a date
+async function getZipInfo(date: string): Promise<{
+  url: string;
+  entryMap: Map<string, ZipEntry>;
+  availableChains: string[];
+}> {
+  const url = `https://api.cijene.dev/v0/archive/${date}.zip`;
+
+  // Get file size via HEAD request
+  const headRes = await fetch(url, { method: "HEAD" });
+  if (!headRes.ok) {
+    throw new Error(`Archive not found for ${date}: ${headRes.status}`);
+  }
+  const contentLength = headRes.headers.get("content-length");
+  if (!contentLength) {
+    throw new Error("Could not determine archive size");
+  }
+  const fileSize = parseInt(contentLength, 10);
+
+  // Get ZIP central directory entries
+  const entries = await getCachedZipEntries(url, fileSize);
+
+  // Build a map of filename -> entry
+  const entryMap = new Map<string, ZipEntry>();
+  for (const entry of entries) {
+    entryMap.set(entry.filename, entry);
+  }
+
+  // Determine available chains
+  const availableChains = new Set<string>();
+  for (const entry of entries) {
+    const parts = entry.filename.split("/");
+    if (parts.length >= 2 && parts[1]) {
+      availableChains.add(parts[0]);
+    }
+  }
+
+  return { url, entryMap, availableChains: [...availableChains] };
+}
+
+// Efficient search: first fetch products only, then fetch prices/stores for matching chains
+export async function searchProductsEfficient(
+  date: string,
+  query: string,
+  city?: string
+): Promise<ProductWithPrices[]> {
+  const normalizedQuery = query.toLowerCase().trim();
+  if (!normalizedQuery) return [];
+
+  const { url, entryMap, availableChains } = await getZipInfo(date);
+
+  // Step 1: Fetch products.csv for all chains in parallel
+  const CONCURRENCY = 8;
+  const allProducts: Product[] = [];
+
+  for (let i = 0; i < availableChains.length; i += CONCURRENCY) {
+    const batch = availableChains.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (chain) => {
+        const productsEntry = entryMap.get(`${chain}/products.csv`);
+        if (!productsEntry) return [];
+        try {
+          const text = await fetchZipFile(url, productsEntry);
+          const rows = parseCSVText(text);
+          return rows.map((r) => ({
+            product_id: r.product_id || "",
+            barcode: r.barcode || "",
+            name: r.name || "",
+            brand: r.brand || "",
+            category: r.category || "",
+            unit: r.unit || "",
+            quantity: r.quantity || "",
+            chain,
+          }));
+        } catch (err) {
+          console.warn(`Failed to fetch products for chain ${chain}:`, err);
+          return [];
+        }
+      })
+    );
+    for (const products of results) {
+      allProducts.push(...products);
+    }
+  }
+
+  // Step 2: Find matching products
+  const matchingProducts = allProducts.filter(
+    (p) =>
+      p.name.toLowerCase().includes(normalizedQuery) ||
+      p.brand.toLowerCase().includes(normalizedQuery) ||
+      p.barcode === normalizedQuery
+  );
+
+  if (matchingProducts.length === 0) return [];
+
+  // Step 3: Determine which chains have matching products
+  const matchingChains = new Set(matchingProducts.map((p) => p.chain));
+
+  // Step 4: Fetch stores and prices only for matching chains
+  const allStores: Store[] = [];
+  const allPrices: Price[] = [];
+
+  const matchingChainList = [...matchingChains];
+  for (let i = 0; i < matchingChainList.length; i += CONCURRENCY) {
+    const batch = matchingChainList.slice(i, i + CONCURRENCY);
+    await Promise.all(
+      batch.map(async (chain) => {
+        try {
+          // Fetch stores
+          const storesEntry = entryMap.get(`${chain}/stores.csv`);
+          if (storesEntry) {
+            const text = await fetchZipFile(url, storesEntry);
+            const rows = parseCSVText(text);
+            allStores.push(
+              ...rows.map((r) => ({
+                store_id: r.store_id || "",
+                type: r.type || "",
+                address: r.address || "",
+                city: r.city || "",
+                zipcode: r.zipcode || "",
+                chain,
+              }))
+            );
+          }
+
+          // Fetch prices
+          const pricesEntry = entryMap.get(`${chain}/prices.csv`);
+          if (pricesEntry) {
+            const text = await fetchZipFile(url, pricesEntry);
+            const rows = parseCSVText(text);
+            allPrices.push(
+              ...rows.map((r) => ({
+                store_id: r.store_id || "",
+                product_id: r.product_id || "",
+                price: parseFloat(r.price) || 0,
+                unit_price: r.unit_price ? parseFloat(r.unit_price) : null,
+                best_price_30: r.best_price_30
+                  ? parseFloat(r.best_price_30)
+                  : null,
+                anchor_price: r.anchor_price
+                  ? parseFloat(r.anchor_price)
+                  : null,
+                special_price: r.special_price
+                  ? parseFloat(r.special_price)
+                  : null,
+                chain,
+              }))
+            );
+          }
+        } catch (err) {
+          console.warn(`Failed to fetch data for chain ${chain}:`, err);
+        }
+      })
+    );
+  }
+
+  // Step 5: Build result using searchProducts logic
+  const data: ArchiveData = {
+    stores: allStores,
+    products: allProducts,
+    prices: allPrices,
+    date,
+  };
+
+  return searchProducts(data, query, city);
+}
+
+// Fetch data for all chains for a given date using range requests
 export async function fetchDayData(
   date: string,
   chains?: string[]
 ): Promise<ArchiveData> {
-  const JSZip = (await import("jszip")).default;
+  const { url, entryMap, availableChains } = await getZipInfo(date);
 
-  const url = `https://api.cijene.dev/v0/archive/${date}.zip`;
-  const res = await fetch(url, {
-    next: { revalidate: 86400 }, // Cache for 24 hours
-  });
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch archive for ${date}: ${res.status}`);
-  }
-
-  const buffer = await res.arrayBuffer();
-  const zip = await JSZip.loadAsync(buffer);
+  const chainsToProcess = chains
+    ? availableChains.filter((c) => chains.includes(c))
+    : availableChains;
 
   const allStores: Store[] = [];
   const allProducts: Product[] = [];
   const allPrices: Price[] = [];
 
-  // Get list of chains in the archive
-  const chainFolders = new Set<string>();
-  zip.forEach((path) => {
-    const parts = path.split("/");
-    if (parts.length >= 2 && parts[1]) {
-      chainFolders.add(parts[0]);
-    }
-  });
+  // Process chains in parallel (limit concurrency to avoid overwhelming the server)
+  const CONCURRENCY = 5;
+  for (let i = 0; i < chainsToProcess.length; i += CONCURRENCY) {
+    const batch = chainsToProcess.slice(i, i + CONCURRENCY);
+    await Promise.all(
+      batch.map(async (chain) => {
+        try {
+          // Fetch stores
+          const storesEntry = entryMap.get(`${chain}/stores.csv`);
+          if (storesEntry) {
+            const text = await fetchZipFile(url, storesEntry);
+            const rows = parseCSVText(text);
+            allStores.push(
+              ...rows.map((r) => ({
+                store_id: r.store_id || "",
+                type: r.type || "",
+                address: r.address || "",
+                city: r.city || "",
+                zipcode: r.zipcode || "",
+                chain,
+              }))
+            );
+          }
 
-  const chainsToProcess = chains
-    ? [...chainFolders].filter((c) => chains.includes(c))
-    : [...chainFolders];
+          // Fetch products
+          const productsEntry = entryMap.get(`${chain}/products.csv`);
+          if (productsEntry) {
+            const text = await fetchZipFile(url, productsEntry);
+            const rows = parseCSVText(text);
+            allProducts.push(
+              ...rows.map((r) => ({
+                product_id: r.product_id || "",
+                barcode: r.barcode || "",
+                name: r.name || "",
+                brand: r.brand || "",
+                category: r.category || "",
+                unit: r.unit || "",
+                quantity: r.quantity || "",
+                chain,
+              }))
+            );
+          }
 
-  for (const chain of chainsToProcess) {
-    // Parse stores
-    const storesFile = zip.file(`${chain}/stores.csv`);
-    if (storesFile) {
-      const text = await storesFile.async("text");
-      const rows = parseCSVText(text);
-      allStores.push(
-        ...rows.map((r) => ({
-          store_id: r.store_id || "",
-          type: r.type || "",
-          address: r.address || "",
-          city: r.city || "",
-          zipcode: r.zipcode || "",
-          chain,
-        }))
-      );
-    }
-
-    // Parse products
-    const productsFile = zip.file(`${chain}/products.csv`);
-    if (productsFile) {
-      const text = await productsFile.async("text");
-      const rows = parseCSVText(text);
-      allProducts.push(
-        ...rows.map((r) => ({
-          product_id: r.product_id || "",
-          barcode: r.barcode || "",
-          name: r.name || "",
-          brand: r.brand || "",
-          category: r.category || "",
-          unit: r.unit || "",
-          quantity: r.quantity || "",
-          chain,
-        }))
-      );
-    }
-
-    // Parse prices
-    const pricesFile = zip.file(`${chain}/prices.csv`);
-    if (pricesFile) {
-      const text = await pricesFile.async("text");
-      const rows = parseCSVText(text);
-      allPrices.push(
-        ...rows.map((r) => ({
-          store_id: r.store_id || "",
-          product_id: r.product_id || "",
-          price: parseFloat(r.price) || 0,
-          unit_price: r.unit_price ? parseFloat(r.unit_price) : null,
-          best_price_30: r.best_price_30 ? parseFloat(r.best_price_30) : null,
-          anchor_price: r.anchor_price ? parseFloat(r.anchor_price) : null,
-          special_price: r.special_price ? parseFloat(r.special_price) : null,
-          chain,
-        }))
-      );
-    }
+          // Fetch prices
+          const pricesEntry = entryMap.get(`${chain}/prices.csv`);
+          if (pricesEntry) {
+            const text = await fetchZipFile(url, pricesEntry);
+            const rows = parseCSVText(text);
+            allPrices.push(
+              ...rows.map((r) => ({
+                store_id: r.store_id || "",
+                product_id: r.product_id || "",
+                price: parseFloat(r.price) || 0,
+                unit_price: r.unit_price ? parseFloat(r.unit_price) : null,
+                best_price_30: r.best_price_30
+                  ? parseFloat(r.best_price_30)
+                  : null,
+                anchor_price: r.anchor_price
+                  ? parseFloat(r.anchor_price)
+                  : null,
+                special_price: r.special_price
+                  ? parseFloat(r.special_price)
+                  : null,
+                chain,
+              }))
+            );
+          }
+        } catch (err) {
+          console.warn(`Failed to fetch data for chain ${chain}:`, err);
+        }
+      })
+    );
   }
 
   return { stores: allStores, products: allProducts, prices: allPrices, date };

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  fetchDayData,
-  searchProducts,
+  searchProductsEfficient,
   getTodayDate,
   fetchArchiveList,
 } from "@/lib/cijene";
@@ -31,8 +30,7 @@ export async function GET(request: NextRequest) {
       // Continue with requested date
     }
 
-    const data = await fetchDayData(actualDate);
-    const products = searchProducts(data, query, city);
+    const products = await searchProductsEfficient(actualDate, query, city);
 
     return NextResponse.json({
       products,
