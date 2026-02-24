@@ -45,13 +45,12 @@ The project has been transformed from a Next.js starter template into "Kolko Kos
 
 ## Known Issues / Limitations
 
-- ZIP files are ~80MB, too large for Next.js data cache (2MB limit) - warning during build but works at runtime
 - Price history API downloads multiple ZIP files which is slow - consider optimization
-- The ZIP files are processed server-side on each request (no persistent caching)
+- The ZIP files are processed server-side on each request (no persistent caching beyond in-memory ZIP entry cache)
 
 ## Current Focus
 
-The initial version is deployed. Next steps based on user feedback:
+Search is now working. Next steps based on user feedback:
 1. Performance optimization (caching, streaming)
 2. UI improvements
 3. Additional features (barcode scanner, shopping list, etc.)
@@ -61,3 +60,4 @@ The initial version is deployed. Next steps based on user feedback:
 | Date | Changes |
 |------|---------|
 | 2026-02-24 | Initial build of Kolko Kosta price comparison website |
+| 2026-02-24 | Fixed search error: replaced full ZIP download with HTTP range requests; now fetches only needed CSV files (~5-15MB vs 83MB) |
