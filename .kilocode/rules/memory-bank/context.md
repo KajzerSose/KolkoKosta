@@ -20,6 +20,11 @@ The project has been transformed from a Next.js starter template into "Kolko Kos
 - [x] Built PriceHistoryChart component with recharts line chart
 - [x] TypeScript and ESLint checks pass
 - [x] Committed and pushed to repository
+- [x] Added SQLite database layer with Drizzle ORM (stores, products, prices, ingestion_log tables)
+- [x] Created data ingestion script (src/db/ingest.ts) - downloads daily ZIP and loads into DB
+- [x] Created db-queries.ts library for fast DB-based search and price history
+- [x] Updated /api/search and /api/history to use DB first, fall back to ZIP range requests
+- [x] Generated Drizzle migrations
 
 ## Current Structure
 

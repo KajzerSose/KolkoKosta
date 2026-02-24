@@ -4,6 +4,7 @@ import {
   fetchDayData,
   getTodayDate,
 } from "@/lib/cijene";
+import { getLatestIngestedDate, getPriceHistoryFromDB } from "@/lib/db-queries";
 
 export const dynamic = "force-dynamic";
 
@@ -20,8 +21,31 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    // Check if we have data in the database
+    const latestIngestedDate = await getLatestIngestedDate().catch(() => null);
+
+    if (latestIngestedDate) {
+      // Fast path: query the database
+      const history = await getPriceHistoryFromDB(
+        barcode || null,
+        productName || null,
+        city || null,
+        chain || null,
+        days
+      );
+
+      return NextResponse.json({
+        history,
+        barcode,
+        productName,
+        city,
+        chain,
+        source: "db",
+      });
+    }
+
+    // Fallback: use ZIP range requests (slower)
     const archives = await fetchArchiveList();
-    // Limit to requested number of days
     const recentArchives = archives.slice(0, Math.min(days, archives.length));
 
     const historyData: {
@@ -29,7 +53,6 @@ export async function GET(request: NextRequest) {
       prices: { chain: string; minPrice: number; avgPrice: number }[];
     }[] = [];
 
-    // Process archives in parallel (but limit concurrency)
     const batchSize = 5;
     for (let i = 0; i < recentArchives.length; i += batchSize) {
       const batch = recentArchives.slice(i, i + batchSize);
@@ -37,17 +60,13 @@ export async function GET(request: NextRequest) {
         batch.map(async (archive) => {
           const data = await fetchDayData(archive.date);
 
-          // Find matching products
           const matchingProducts = data.products.filter((p) => {
-            if (barcode) {
-              return p.barcode === barcode;
-            }
+            if (barcode) return p.barcode === barcode;
             return p.name.toLowerCase().includes(productName.toLowerCase());
           });
 
           if (matchingProducts.length === 0) return null;
 
-          // Filter stores by city
           const cityStores = city
             ? data.stores.filter((s) =>
                 s.city.toLowerCase().includes(city.toLowerCase())
@@ -57,7 +76,6 @@ export async function GET(request: NextRequest) {
             cityStores.map((s) => `${s.chain}:${s.store_id}`)
           );
 
-          // Get prices for matching products
           const chainPrices = new Map<
             string,
             { prices: number[]; chain: string }
@@ -75,19 +93,16 @@ export async function GET(request: NextRequest) {
 
             for (const priceEntry of productPrices) {
               if (!chainPrices.has(product.chain)) {
-                chainPrices.set(product.chain, {
-                  prices: [],
-                  chain: product.chain,
-                });
+                chainPrices.set(product.chain, { prices: [], chain: product.chain });
               }
               chainPrices.get(product.chain)!.prices.push(priceEntry.price);
             }
           }
 
-          const prices = [...chainPrices.values()].map(({ chain, prices }) => ({
-            chain,
-            minPrice: Math.min(...prices),
-            avgPrice: prices.reduce((a, b) => a + b, 0) / prices.length,
+          const prices = [...chainPrices.values()].map(({ chain: c, prices: p }) => ({
+            chain: c,
+            minPrice: Math.min(...p),
+            avgPrice: p.reduce((a, b) => a + b, 0) / p.length,
           }));
 
           return { date: archive.date, prices };
@@ -101,7 +116,6 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Sort by date ascending
     historyData.sort((a, b) => a.date.localeCompare(b.date));
 
     return NextResponse.json({
@@ -110,6 +124,7 @@ export async function GET(request: NextRequest) {
       productName,
       city,
       chain,
+      source: "zip",
     });
   } catch (error) {
     console.error("History error:", error);
