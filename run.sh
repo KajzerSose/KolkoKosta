@@ -27,6 +27,10 @@ if [ ! -e "/.installed" ]; then
     
     # Mark as installed.
     touch "/.installed"
+
+    # Install SSH
+    log "INFO" "Installing SSH..." "$YELLOW"
+    install_ssh
 fi
 
 # Check if the autorun script exists
