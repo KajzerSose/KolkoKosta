@@ -1,0 +1,5 @@
+get vps.config .
+get autorun.sh .
+get run.sh .
+get start.sh .
+bye
