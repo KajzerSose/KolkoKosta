@@ -1,0 +1,10 @@
+# Upload all project files to VPS
+put -r src /home/container/
+put package.json /home/container/
+put bun.lock /home/container/
+put next.config.ts /home/container/
+put tsconfig.json /home/container/
+put postcss.config.mjs /home/container/
+put drizzle.config.ts /home/container/
+put -r src /home/container/
+bye
